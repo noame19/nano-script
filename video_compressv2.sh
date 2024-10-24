@@ -220,7 +220,6 @@ main() {
 		ffmpeg -y -i "$input_file" -c:v libx264 -b:v "${vmax_bitrate}k" -pass 1 -threads "${THREADS}" -an -f mp4 /dev/null && \
 		ffmpeg -i "$input_file" -c:v libx264 -b:v "${vmax_bitrate}k" -pass 2 -threads "${THREADS}" -c:a aac -b:a "${amax_bitrate}k" "$output_file"
 		rm -f ffmpeg2pass-*
-		write_log "info" "video: ${vmax_bitrate}k, audio: ${amax_bitrate}k" "$LOG_FILE_ALL"
 		
 		# 匹配压缩前后时长，检测压缩后的文件是否正常,-s表示文件大小是否为空
         if [ -s "$output_file" ]; then
