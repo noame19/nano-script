@@ -1,12 +1,12 @@
 #!/bin/bash
 #该脚本自动压缩input目录下的指定格式的视频文件成h264 x acc 视频编码，可自定义码率，已压缩或不符合压缩条件的将跳过。
-#注意：需要系统安装好ffmpge、ffprobe
+#注意：需要系统安装好ffmpge、ffprobe,压缩检测无误后自动替换源文件，并增加batch后缀，请提前做好文件备份，备份！！
 #压缩错误原因和路径全部记录至fail目录中
 #Author: noame19
 #Time: Thu 24 Oct 2024 12:02:31 AM CST
 ###==============设置部分========================
 # 输入路径、压缩临时输出路径、日志路径
-INPUT_DIR="/home/test/input"
+INPUT_DIR="/home/fff"
 OUTPUT_DIR="/home/test/output"
 LOG_DIR="/home/test/logs"
 
@@ -15,12 +15,17 @@ LOG_DIR="/home/test/logs"
 #关于不标准分辨率的视频，会以现有4k的码率，进行等像素比缩小码率
 #小于720p或大于4k的视频，分别重命名lo_skip、la_skip后跳过
 THREADS="16"
-BR_720p="2200"
-BR_1080p="5200"
+BR_720p="2500"
+BR_1080p="5600"
 BR_4k="18432"
 BR_AUDIO="165"
 # 需要处理的视频格式，可手动调整，多视频音频流的mkv文件可能会出错
 VIDEO_EXT=("mp4" "mkv" "mov" "m4v")
+
+#压缩错误判定时长，如：不在2s内则判定两个文件不一致，压缩错误
+JUDGE_TIME="2"
+#压缩错误最大重试次数
+MAX_TRY="3"
 
 ###==================================================
 
@@ -55,6 +60,11 @@ clean() {
     find "$LOG_DIR" -type f -name "video_log_*.txt"  -mtime +30 -exec rm {} \;
     find "$LOG_DIR" -type f -name "video_fail_*.txt" -mtime +30 -exec rm {} \;
 	rm -rf "$OUTPUT_DIR"
+}
+
+# 获取重试次数函数
+get_retry_count() {
+    grep -o "$input_file" "$LOG_FILE_FAIL" | wc -l
 }
 	
 # 获取视频时长
@@ -176,7 +186,7 @@ main() {
 			total_count=$((total_count+1))
 			continue
 		else
-			vmax_bitrate=$(echo "scale=0; $BR_4k / 3840 / 2160 * $width * $height" | bc)
+			vmax_bitrate=$(echo "scale=0; $BR_4k * $width * $height / 3840 / 2160 " | bc)
 		fi
 
 		# 如果原视频码率低于或等于设定的最大视频码率，跳过压缩并重命名
@@ -210,13 +220,13 @@ main() {
 		ffmpeg -y -i "$input_file" -c:v libx264 -b:v "${vmax_bitrate}k" -pass 1 -threads "${THREADS}" -an -f mp4 /dev/null && \
 		ffmpeg -i "$input_file" -c:v libx264 -b:v "${vmax_bitrate}k" -pass 2 -threads "${THREADS}" -c:a aac -b:a "${amax_bitrate}k" "$output_file"
 		rm -f ffmpeg2pass-*
+		write_log "info" "video: ${vmax_bitrate}k, audio: ${amax_bitrate}k" "$LOG_FILE_ALL"
 		
-		# 匹配压缩前后时长，检测压缩后的文件是否正常
-        if [ $? -eq 0 ] && [ -f "$output_file" ]; then
+		# 匹配压缩前后时长，检测压缩后的文件是否正常,-s表示文件大小是否为空
+        if [ -s "$output_file" ]; then
             compressed_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null | cut -d'.' -f1)
-			#echo "original_duration: $original_duration, compressed_duration: $compressed_duration" >> "$LOG_FILE_ALL"
-            if [ "$original_duration" = "$compressed_duration" ]; then
-				write_log "done" "Compression Successful,bitrate: $vmax_bitrate, ${input_file}" "$LOG_FILE_ALL"
+            if [ "$original_duration" -eq "$compressed_duration" ] || [ $((original_duration - compressed_duration)) -le $JUDGE_TIME ] && [ $((compressed_duration - original_duration)) -le $JUDGE_TIME ]; then
+				write_log "done" "Compression Successful,bitrate: $vmax_bitrate,duration: $compressed_duration, ${input_file}" "$LOG_FILE_ALL"
 				#printf "%s %s\n" "$output_file" "$input_file" >> "$LOG_FILE_DONE"
 				rm -f "$input_file"
 				mv "$output_file" "${input_file%.$ext}_batch.mp4"
@@ -224,16 +234,19 @@ main() {
                 done_count=$((done_count+1))
 				total_count=$((total_count+1))
             else
-                write_log "fail" "Compression Video Duration no same as original, remove file,${input_file}_fail.$ext" "$LOG_FILE_ALL"
-				write_log "fail" "Compression Video Duration no same as original, remove file, ${input_file%.$ext}_fail.$ext" "$LOG_FILE_FAIL"
+				retry_count=$((get_retry_count + 1))
+				if [ "$retry_count" -ge "$max_try" ] || [ "$compressed_duration" -eq 0 ]; then
+					mv "$input_file" "${input_file%.$ext}_fail.$ext"
+				fi
+				write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, ${input_file}" "$LOG_FILE_FAIL"
+				write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, try $retry_count time, ${input_file}" "$LOG_FILE_ALL"
 				rm -rf "$FIN_OUTPUT_DIR"
-				#mv "$input_file" "${input_file%.$ext}_fail.$ext"
-                fail_count=$((fail_count+1))
+				fail_count=$((fail_count+1))
 				total_count=$((total_count+1))
             fi
         else
-            write_log "fail" "Compression Result is null , remove file, ${input_file%.$ext}_fail.$ext" "$LOG_FILE_ALL"
-			write_log "fail" "Compression Result is null , remove file, ${input_file%.$ext}_fail.$ext" "$LOG_FILE_FAIL"
+            write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_ALL"
+			write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_FAIL"
 			rm -rf "$FIN_OUTPUT_DIR"
 			mv "$input_file" "${input_file%.$ext}_fail.$ext"
             fail_count=$((fail_count+1))
@@ -269,7 +282,7 @@ main() {
 	echo "" >> "$LOG_FILE_ALL"
 
 	if [ "$fail_count" -ne "0" ]; then
-		echo "=============" >> "$LOG_FILE_FAIL"
+		echo "==============================" >> "$LOG_FILE_FAIL"
 	fi
 }
 
