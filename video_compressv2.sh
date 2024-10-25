@@ -15,9 +15,9 @@ LOG_DIR="/home/test/logs"
 #关于不标准分辨率的视频，会以现有4k的码率，进行等像素比缩小码率
 #小于720p或大于4k的视频，分别重命名lo_skip、la_skip后跳过
 THREADS="16"
-BR_720p="2500"
-BR_1080p="5500"
-BR_4k="18432"
+BR_720p="3000"
+BR_1080p="6000"
+BR_4k="20000"
 BR_AUDIO="165"
 # 需要处理的视频格式，可手动调整，多视频音频流的mkv文件可能会出错
 VIDEO_EXT=("mp4" "mkv" "mov" "m4v")
@@ -119,7 +119,6 @@ video_replace() {
 					write_log "info" "$compressed_file -> $src_file" "$LOG_FILE_ALL"
 					mv "$compressed_file" "$src_file"
 					rm -rf "${compressed_file%/*}"
-					
 					# 删除源文件
 					rm "$src_file_replace"
 					write_log "info" "$src_file_replace was removed" "$LOG_FILE_ALL"
@@ -132,11 +131,11 @@ video_replace() {
 				write_log "info" "$src_file_replace is no exist,remove compressed_file" "$LOG_FILE_ALL"
 			fi
 		done
-		rm -f "$LOG_FILE_DONE"
-		total_replace=$(grep "$LOG_FILE_DONE" | wc -l)
+		local total_replace=$(wc -l < "$LOG_FILE_DONE")
 		echo "需要移动$total_replace个视频，实际成功移动$move_count个"
 		write_log "info" "需要移动$total_replace个视频，实际成功移动$move_count个" "$LOG_FILE_ALL"
 		write_log "info" "Replace misson finished" "$LOG_FILE_ALL"
+		rm -f "$LOG_FILE_DONE"
 		sleep 3
     fi 
 }
@@ -223,7 +222,7 @@ main() {
 		if [ "$max_dim" -le 960 ]; then
 			write_log "skip" "Resolution < 540p, Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
 			skip_size=$(total_skip_size "$input_file" "skip_size")
-			mv "$input_file" "${input_file%.$ext}lo_skip.$ext"
+			mv "$input_file" "${input_file%.$ext}_lo_skip.$ext"
 			skip_count=$((skip_count+1))
 			total_count=$((total_count+1))
 			continue
@@ -236,7 +235,7 @@ main() {
 		elif [ "$min_dim" -gt 2160 ]; then
 			write_log "skip" "Resolution > 4k,Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
 			skip_size=$(total_skip_size "$input_file" "skip_size")
-			mv "$input_file" "${input_file%.$ext}la_skip.$ext"
+			mv "$input_file" "${input_file%.$ext}_la_skip.$ext"
 			skip_count=$((skip_count+1))
 			total_count=$((total_count+1))
 			continue
@@ -273,7 +272,7 @@ main() {
 		fi
 		
 		#设置vbr最大码率(为原设定码率的1.5倍)
-		vmax_bitrate=$(echo "scale=0; $v_bitrate * 1.7" | bc)
+		vmax_bitrate=$(echo "scale=0; $v_bitrate * 1.5" | bc)
 		vbufsize=$(echo "scale=0; $vmax_bitrate * 2" | bc)
 		
 		# 压缩视频，使用 2-pass 方式
@@ -322,16 +321,21 @@ main() {
     after_size=$(du -sb "$OUTPUT_DIR" | awk '{print $1}')
 	
 	# 计算差值和压缩率
-	diff_size=$((before_size - after_size - skip_size))
-    if [ $diff_size -ge 0 ]; then
-        size_change="释放"
-		compression_ratio=$(echo "scale=2; $diff_size / $before_size * 100" | bc)
-    else [ $diff_size -lt 0 ]
-        diff_size=$((skip_size + after_size - before_size))
-        size_change="增加"
-        compression_ratio=$(echo "scale=2; $after_size / $before_size * 100" | bc)
-    fi
-	
+	if [ $after_size -ne 0 ]; then 
+		diff_size=$((before_size - after_size - skip_size))
+		if [ $diff_size -ge 0 ]; then
+			size_change="释放"
+			compression_ratio=$(echo "scale=2; $diff_size / $before_size * 100" | bc)
+		else [ $diff_size -lt 0 ]
+			diff_size=$((skip_size + after_size - before_size))
+			size_change="增加"
+			compression_ratio=$(echo "scale=2; $after_size / $before_size * 100" | bc)
+		fi
+	else
+		diff_size="0"
+		size_change="释放"
+		compression_ratio="0"
+	fi
 	# 格式化压缩率，添加百分号并保留两位小数
 	#compression_ratio=$(printf "%.2f%%" "$compression_ratio")
 
