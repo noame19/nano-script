@@ -6,7 +6,7 @@
 #Time: Thu 24 Oct 2024 12:02:31 AM CST
 ###==============设置部分========================
 # 输入路径、压缩临时输出路径、日志路径
-INPUT_DIR="/home/fff"
+INPUT_DIR="/home/test/input"
 OUTPUT_DIR="/home/test/output"
 LOG_DIR="/home/test/logs"
 
@@ -16,14 +16,14 @@ LOG_DIR="/home/test/logs"
 #小于720p或大于4k的视频，分别重命名lo_skip、la_skip后跳过
 THREADS="16"
 BR_720p="2500"
-BR_1080p="5600"
+BR_1080p="5500"
 BR_4k="18432"
 BR_AUDIO="165"
 # 需要处理的视频格式，可手动调整，多视频音频流的mkv文件可能会出错
 VIDEO_EXT=("mp4" "mkv" "mov" "m4v")
 
-#压缩错误判定时长，如：不在2s内则判定两个文件不一致，压缩错误
-JUDGE_TIME="2"
+#压缩错误判定时长，如：源文件和压缩文件时长差距不在2s以内，则判定两个文件不一致，压缩错误
+GAP_TIME="2"
 #压缩错误最大重试次数
 MAX_TRY="3"
 
@@ -31,6 +31,7 @@ MAX_TRY="3"
 
 LOG_FILE_ALL="$LOG_DIR/video_log_$(date +%Y%m%d).txt"
 LOG_FILE_FAIL="$LOG_DIR/video_fail_$(date +%Y%m).txt"
+LOG_FILE_DONE="$LOG_DIR/video_done_$(date +%Y).txt"
 
 # 日志写入
 write_log() {
@@ -59,7 +60,6 @@ clean() {
 	# 清理30天过期日志文件
     find "$LOG_DIR" -type f -name "video_log_*.txt"  -mtime +30 -exec rm {} \;
     find "$LOG_DIR" -type f -name "video_fail_*.txt" -mtime +30 -exec rm {} \;
-	rm -rf "$OUTPUT_DIR"
 }
 
 # 获取重试次数函数
@@ -79,7 +79,7 @@ get_video_info() {
 	if [ $stream_count -gt 2 ]; then
 		temp_file="$OUTPUT_DIR/temp.mp4"
 		write_log "info" "stream $stream_count,cover to stream1.temp $1" "$LOG_FILE_ALL"
-		ffmpeg -i "$1" -c copy -map 0:v -map 0:a -sn -f mp4 "$temp_file" #-sn禁用字幕复制
+		ffmpeg -i -y "$1" -c copy -map 0:v -map 0:a -sn -f mp4 "$temp_file" #-sn禁用字幕复制
 		ffprobe -v error -select_streams v:0 -show_entries stream=width,height,bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
 		ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null | cut -d'.' -f1
 		ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
@@ -91,8 +91,49 @@ get_video_info() {
 	fi
 }
 
-# 主函数
+#把已压缩视频替换源文件,并删除源文件和temp的文件
+video_replace() {
+	move_count=0
+	if [ -s "$LOG_FILE_DONE" ]; then
+		echo "============================" >> "$LOG_FILE_ALL"
+		echo "Replace misson started at $(date)" >> "$LOG_FILE_ALL"
+		# 读取完成记录文件中的每一行到数组
+        mapfile -t file_pairs < "$LOG_FILE_DONE"
+		# 处理完成记录文件中的每一行
+		for pair in "${file_pairs[@]}"; do
+			# 读取压缩文件和源文件路径
+			IFS=' ' read -r compressed_file src_file <<< "$pair"
+			src_file_replace="${src_file%batch*}replace.mp4"
+			if [ -f "$src_file_replace" ]; then
+				# 检查压缩文件是否存在
+				if [ -f "$compressed_file" ]; then
+					# 移动压缩文件到源文件位置
+					write_log "info" "$compressed_file -> $src_file" "$LOG_FILE_ALL"
+					mv "$compressed_file" "$src_file"
+					rm -rf "${compressed_file%/*}"
+					
+					# 删除源文件
+					rm "$src_file_relace"
+					write_log "info" "$src_file_replace was removed" "$LOG_FILE_ALL"
+					move_count=$((move_count+1))
+				else
+					write_log "info" "$compressed_file is no exist" "$LOG_FILE_ALL"
+				fi
+			else
+				rm -rf "${compressed_file%/*}"
+				write_log "info" "$src_file_replace is no exist,remove compressed_file" "$LOG_FILE_ALL"
+			fi
+		done
+		rm -f "$LOG_FILE_DONE"
+		total_replace=$(grep "$LOG_FILE_DONE" | wc -l)
+		echo "需要移动$total_replace个视频，实际成功移动$move_count个"
+		write_log "info" "需要移动$total_replace个视频，实际成功移动$move_count个" "$LOG_FILE_ALL"
+		write_log "info" "Replace misson finished" "$LOG_FILE_ALL"
+    fi 
+}
+# 压缩主函数
 main() {
+	#创建log文件夹
 	if [ ! -d "$LOG_DIR" ]; then
 		mkdir -p "$LOG_DIR"
 	fi
@@ -100,15 +141,16 @@ main() {
 		mkdir -p "$OUTPUT_DIR"
 	fi
     clean
-	#创建log文件夹
 
-	echo "============================" >> "$LOG_FILE_ALL"
-	echo "" >> "$LOG_FILE_ALL"
-    echo "Compress misson started at $(date)" >> "$LOG_FILE_ALL"
     total_count=0
     done_count=0
     fail_count=0
     skip_count=0
+
+	video_replace
+
+	echo "============================" >> "$LOG_FILE_ALL"
+	echo "Compress misson started at $(date)" >> "$LOG_FILE_ALL"
 	
 	# 根据扩展名设置find参数
     find_expr=""
@@ -124,7 +166,7 @@ main() {
     before_size=$(du -sb "$INPUT_DIR" | awk '{print $1}')
 	
 	#排除 _batch 、 _kip 、 _fail，find结果保存数组files
-    mapfile -t files < <(find "$INPUT_DIR" -type f \( $find_expr \) ! -name "*batch.*" ! -name "*skip.*" ! -name "*fail.*")
+    mapfile -t files < <(find "$INPUT_DIR" -type f \( $find_expr \) ! -name "*batch.*" ! -name "*skip.*" ! -name "*fail.*" ! -name "*replace.*")
 
     # 遍历文件列表
 	for input_file in "${files[@]}"; do
@@ -174,11 +216,11 @@ main() {
 			total_count=$((total_count+1))
 			continue
 		elif [ "$max_dim" -eq 1280 ] && [ "$min_dim" -eq 720 ]; then
-			vmax_bitrate=$BR_720p
+			v_bitrate=$BR_720p
 		elif [ "$max_dim" -eq 1920 ] && [ "$min_dim" -eq 1080 ]; then
-			vmax_bitrate=$BR_1080p
+			v_bitrate=$BR_1080p
 		elif [ "$max_dim" -eq 3840 ] && [ "$min_dim" -eq 2160 ]; then
-			vmax_bitrate=$BR_4k
+			v_bitrate=$BR_4k
 		elif [ "$min_dim" -gt 2160 ]; then
 			write_log "skip" "Resolution > 4k,Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
 			mv "$input_file" "${input_file%.$ext}la_skip.$ext"
@@ -186,12 +228,12 @@ main() {
 			total_count=$((total_count+1))
 			continue
 		else
-			vmax_bitrate=$(echo "scale=0; $BR_4k * $width * $height / 3840 / 2160 " | bc)
+			v_bitrate=$(echo "scale=0; $BR_4k * $width * $height / 3840 / 2160 " | bc)
 		fi
 
 		# 如果原视频码率低于或等于设定的最大视频码率，跳过压缩并重命名
-		if [ "$vbitrate_kbps" -le "$vmax_bitrate" ]; then
-			write_log "skip" "Bitrate has <= $vmax_bitrate kbps ,Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
+		if [ "$vbitrate_kbps" -le "$v_bitrate" ]; then
+			write_log "skip" "Bitrate has <= $v_bitrate kbps ,Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
 			# 重命名文件，添加_batch
 			mv "$input_file" "${input_file%.$ext}_batch.$ext"
 			skip_count=$((skip_count+1))
@@ -201,11 +243,11 @@ main() {
 		
 		# 设置压缩音频码率(原音频码率找不到，或大于设定的音码率则按设定音码率压缩)
 		if [ ! -z "$abitrate_kbps" ] && [ "$abitrate_kbps" -gt "$BR_AUDIO" ]; then
-			amax_bitrate="$BR_AUDIO"
+			a_bitrate="$BR_AUDIO"
 		elif [ ! -z "$abitrate_kbps" ] && [ "$abitrate_kbps" -le "$BR_AUDIO" ]; then
-			amax_bitrate="$abitrate_kbps"
+			a_bitrate="$abitrate_kbps"
 		else
-			amax_bitrate="$BR_AUDIO"
+			a_bitrate="$BR_AUDIO"
 		fi
 		
 		# 使用哈希值规避重名问题
@@ -216,20 +258,24 @@ main() {
 			mkdir -p "$FIN_OUTPUT_DIR"
 		fi
 		
+		#设置vbr最大码率(为原设定码率的1.5倍)
+		vmax_bitrate=$(echo "scale=0; $v_bitrate * 1.5" | bc)
+		vbufsize=$(echo "scale=0; $vmax_bitrate * 2" | bc)
+		
 		# 压缩视频，使用 2-pass 方式
-		ffmpeg -y -i "$input_file" -c:v libx264 -b:v "${vmax_bitrate}k" -pass 1 -threads "${THREADS}" -an -f mp4 /dev/null && \
-		ffmpeg -i "$input_file" -c:v libx264 -b:v "${vmax_bitrate}k" -pass 2 -threads "${THREADS}" -c:a aac -b:a "${amax_bitrate}k" "$output_file"
+		ffmpeg -y -i "$input_file" -c:v libx264 -b:v "${v_bitrate}k" -pass 1 -threads "${THREADS}" -an -f mp4 /dev/null && \
+		ffmpeg -y -i "$input_file" -c:v libx264 -b:v "${v_bitrate}k" -maxrate "${vmax_bitrate}k" -bufsize "${vbufsize}k" -pass 2 -threads "${THREADS}" -c:a aac -b:a "${a_bitrate}k" "$output_file"
 		rm -f ffmpeg2pass-*
 		
-		# 匹配压缩前后时长，检测压缩后的文件是否正常,-s表示文件大小是否为空
+		# 匹配压缩前后时长，检测压缩后的文件是否正常,-s表示有文件大小为真
         if [ -s "$output_file" ]; then
             compressed_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null | cut -d'.' -f1)
-            if [ "$original_duration" -eq "$compressed_duration" ] || [ $((original_duration - compressed_duration)) -le $JUDGE_TIME ] && [ $((compressed_duration - original_duration)) -le $JUDGE_TIME ]; then
-				write_log "done" "Compression Successful,bitrate: $vmax_bitrate,duration: $compressed_duration, ${input_file}" "$LOG_FILE_ALL"
-				#printf "%s %s\n" "$output_file" "$input_file" >> "$LOG_FILE_DONE"
-				rm -f "$input_file"
-				mv "$output_file" "${input_file%.$ext}_batch.mp4"
-				rm -rf "$FIN_OUTPUT_DIR"
+            if [ "$original_duration" -eq "$compressed_duration" ] || [ $((original_duration - compressed_duration)) -le $GAP_TIME ] && [ $((compressed_duration - original_duration)) -le $GAP_TIME ]; then
+				#成功后把源文件重命名成过度文件
+				mv "$output_file" "${output_file%.$ext}_batch.mp4"
+				mv "$input_file" "${input_file%.$ext}_replace.$ext"
+				write_log "done" "Compression Successful,bitrate: $v_bitrate,duration: $compressed_duration, ${input_file}" "$LOG_FILE_ALL"
+				printf "%s %s\n" "${output_file%.$ext}_batch.mp4" "${input_file%.$ext}_batch.mp4" >> "$LOG_FILE_DONE"
                 done_count=$((done_count+1))
 				total_count=$((total_count+1))
             else
@@ -237,24 +283,24 @@ main() {
 				if [ "$retry_count" -ge "$max_try" ] || [ "$compressed_duration" -eq 0 ]; then
 					mv "$input_file" "${input_file%.$ext}_fail.$ext"
 				fi
+				rm -rf "$FIN_OUTPUT_DIR"
 				write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, ${input_file}" "$LOG_FILE_FAIL"
 				write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, try $retry_count time, ${input_file}" "$LOG_FILE_ALL"
-				rm -rf "$FIN_OUTPUT_DIR"
 				fail_count=$((fail_count+1))
 				total_count=$((total_count+1))
             fi
         else
-            write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_ALL"
-			write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_FAIL"
 			rm -rf "$FIN_OUTPUT_DIR"
 			mv "$input_file" "${input_file%.$ext}_fail.$ext"
+            write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_ALL"
+			write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_FAIL"
             fail_count=$((fail_count+1))
 			total_count=$((total_count+1))
         fi
     done
 	
 	 # 获取压缩后目录大小
-    after_size=$(du -sb "$INPUT_DIR" | awk '{print $1}')
+    after_size=$(du -sb "$OUTPUT_DIR" | awk '{print $1}')
 	
 	# 计算差值和压缩率
 	diff_size=$((before_size - after_size))
@@ -278,7 +324,6 @@ main() {
     write_log "summ" "$summary" "$LOG_FILE_ALL"
 	echo "$summary"
 
-	echo "" >> "$LOG_FILE_ALL"
 
 	if [ "$fail_count" -ne "0" ]; then
 		echo "==============================" >> "$LOG_FILE_FAIL"
