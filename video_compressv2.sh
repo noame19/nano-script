@@ -44,7 +44,7 @@ write_log() {
 
 #单位转换
 convert_size() {
-    size=$1
+    local size=$1
     if [ "$size" -ge 1099511627776 ]; then  # 大于等于1TB
         echo "$(awk "BEGIN {printf \"%.2f TB\", $size / 1099511627776}")"
     elif [ "$size" -ge 1073741824 ]; then  # 大于等于1GB
@@ -72,14 +72,22 @@ get_retry_count() {
 	# #ffmpeg -i "$1" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',' | cut -d'.' -f1
 # }
 
+# 获取要跳过文件的大小,并累加
+total_skip_size() {
+	local new_skip_size=$(du -sb "$1" | awk '{print $1}')
+	local old_skip_size=$2
+	echo "$((new_skip_size + old_skip_size))"
+	
+}
+
 # 使用ffprobe获取视频信息：分辨率,时长
 get_video_info() {
 	# 如果流数量大于2，则进行转封装临时文件，再进行时长获取
-	stream_count=$(ffprobe -v error -show_format -show_entries format=nb_streams -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | sed -n '1p')
+	local stream_count=$(ffprobe -v error -show_format -show_entries format=nb_streams -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | sed -n '1p')
 	if [ $stream_count -gt 2 ]; then
-		temp_file="$OUTPUT_DIR/temp.mp4"
+		local temp_file="$OUTPUT_DIR/temp.mp4"
 		write_log "info" "stream $stream_count,cover to stream1.temp $1" "$LOG_FILE_ALL"
-		ffmpeg -i -y "$1" -c copy -map 0:v -map 0:a -sn -f mp4 "$temp_file" #-sn禁用字幕复制
+		ffmpeg -y -i "$1" -c copy -map 0:v -map 0:a -sn -f mp4 "$temp_file" #-sn禁用字幕复制
 		ffprobe -v error -select_streams v:0 -show_entries stream=width,height,bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
 		ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null | cut -d'.' -f1
 		ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
@@ -93,7 +101,7 @@ get_video_info() {
 
 #把已压缩视频替换源文件,并删除源文件和temp的文件
 video_replace() {
-	move_count=0
+	local move_count=0
 	if [ -s "$LOG_FILE_DONE" ]; then
 		echo "============================" >> "$LOG_FILE_ALL"
 		echo "Replace misson started at $(date)" >> "$LOG_FILE_ALL"
@@ -102,8 +110,8 @@ video_replace() {
 		# 处理完成记录文件中的每一行
 		for pair in "${file_pairs[@]}"; do
 			# 读取压缩文件和源文件路径
-			IFS=' ' read -r compressed_file src_file <<< "$pair"
-			src_file_replace="${src_file%batch*}replace.mp4"
+			IFS=' ' read -r compressed_file src_file src_ext <<< "$pair"
+			src_file_replace="${src_file%batch*}replace.$src_ext"
 			if [ -f "$src_file_replace" ]; then
 				# 检查压缩文件是否存在
 				if [ -f "$compressed_file" ]; then
@@ -113,7 +121,7 @@ video_replace() {
 					rm -rf "${compressed_file%/*}"
 					
 					# 删除源文件
-					rm "$src_file_relace"
+					rm "$src_file_replace"
 					write_log "info" "$src_file_replace was removed" "$LOG_FILE_ALL"
 					move_count=$((move_count+1))
 				else
@@ -129,10 +137,19 @@ video_replace() {
 		echo "需要移动$total_replace个视频，实际成功移动$move_count个"
 		write_log "info" "需要移动$total_replace个视频，实际成功移动$move_count个" "$LOG_FILE_ALL"
 		write_log "info" "Replace misson finished" "$LOG_FILE_ALL"
+		sleep 3
     fi 
 }
 # 压缩主函数
 main() {
+
+    #定义计算变量
+    local total_count=0
+    local done_count=0
+    local fail_count=0
+    local skip_count=0
+	local skip_size=0
+	
 	#创建log文件夹
 	if [ ! -d "$LOG_DIR" ]; then
 		mkdir -p "$LOG_DIR"
@@ -141,12 +158,6 @@ main() {
 		mkdir -p "$OUTPUT_DIR"
 	fi
     clean
-
-    total_count=0
-    done_count=0
-    fail_count=0
-    skip_count=0
-
 	video_replace
 
 	echo "============================" >> "$LOG_FILE_ALL"
@@ -164,7 +175,7 @@ main() {
 	
     # 获取压缩前目录大小
     before_size=$(du -sb "$INPUT_DIR" | awk '{print $1}')
-	
+
 	#排除 _batch 、 _kip 、 _fail，find结果保存数组files
     mapfile -t files < <(find "$INPUT_DIR" -type f \( $find_expr \) ! -name "*batch.*" ! -name "*skip.*" ! -name "*fail.*" ! -name "*replace.*")
 
@@ -211,6 +222,7 @@ main() {
         # 设置压缩视频码率(自适应码率)
 		if [ "$max_dim" -le 960 ]; then
 			write_log "skip" "Resolution < 540p, Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
+			skip_size=$(total_skip_size "$input_file" "skip_size")
 			mv "$input_file" "${input_file%.$ext}lo_skip.$ext"
 			skip_count=$((skip_count+1))
 			total_count=$((total_count+1))
@@ -223,6 +235,7 @@ main() {
 			v_bitrate=$BR_4k
 		elif [ "$min_dim" -gt 2160 ]; then
 			write_log "skip" "Resolution > 4k,Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
+			skip_size=$(total_skip_size "$input_file" "skip_size")
 			mv "$input_file" "${input_file%.$ext}la_skip.$ext"
 			skip_count=$((skip_count+1))
 			total_count=$((total_count+1))
@@ -234,6 +247,7 @@ main() {
 		# 如果原视频码率低于或等于设定的最大视频码率，跳过压缩并重命名
 		if [ "$vbitrate_kbps" -le "$v_bitrate" ]; then
 			write_log "skip" "Bitrate has <= $v_bitrate kbps ,Rename file and Skip ${input_file}" "$LOG_FILE_ALL"
+			skip_size=$(total_skip_size "$input_file" "skip_size")
 			# 重命名文件，添加_batch
 			mv "$input_file" "${input_file%.$ext}_batch.$ext"
 			skip_count=$((skip_count+1))
@@ -259,7 +273,7 @@ main() {
 		fi
 		
 		#设置vbr最大码率(为原设定码率的1.5倍)
-		vmax_bitrate=$(echo "scale=0; $v_bitrate * 1.5" | bc)
+		vmax_bitrate=$(echo "scale=0; $v_bitrate * 1.7" | bc)
 		vbufsize=$(echo "scale=0; $vmax_bitrate * 2" | bc)
 		
 		# 压缩视频，使用 2-pass 方式
@@ -275,25 +289,30 @@ main() {
 				mv "$output_file" "${output_file%.$ext}_batch.mp4"
 				mv "$input_file" "${input_file%.$ext}_replace.$ext"
 				write_log "done" "Compression Successful,bitrate: $v_bitrate,duration: $compressed_duration, ${input_file}" "$LOG_FILE_ALL"
-				printf "%s %s\n" "${output_file%.$ext}_batch.mp4" "${input_file%.$ext}_batch.mp4" >> "$LOG_FILE_DONE"
+				printf "%s %s %s\n" "${output_file%.$ext}_batch.mp4" "${input_file%.$ext}_batch.mp4 $ext" >> "$LOG_FILE_DONE"
                 done_count=$((done_count+1))
 				total_count=$((total_count+1))
             else
 				retry_count=$((get_retry_count + 1))
 				if [ "$retry_count" -ge "$max_try" ] || [ "$compressed_duration" -eq 0 ]; then
+					skip_count=$((skip_count+1))
 					mv "$input_file" "${input_file%.$ext}_fail.$ext"
+					write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, ${input_file%.$ext}_fail.$ext" "$LOG_FILE_FAIL"
+				    write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, try $retry_count time, ${input_file%.$ext}_fail.$ext" "$LOG_FILE_ALL"
+				else
+					write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, ${input_file}" "$LOG_FILE_FAIL"
+				    write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, try $retry_count time, ${input_file}" "$LOG_FILE_ALL"
 				fi
 				rm -rf "$FIN_OUTPUT_DIR"
-				write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, ${input_file}" "$LOG_FILE_FAIL"
-				write_log "fail" "Compression Duration:$compressed_duration, no same as original:$original_duration, try $retry_count time, ${input_file}" "$LOG_FILE_ALL"
 				fail_count=$((fail_count+1))
 				total_count=$((total_count+1))
             fi
         else
 			rm -rf "$FIN_OUTPUT_DIR"
+			skip_count=$((skip_count+1))
 			mv "$input_file" "${input_file%.$ext}_fail.$ext"
-            write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_ALL"
-			write_log "fail" "Compression Result is null , remove file, ${input_file}" "$LOG_FILE_FAIL"
+            write_log "fail" "Compression Result is null , remove file, ${input_file%.$ext}_fail.$ext" "$LOG_FILE_ALL"
+			write_log "fail" "Compression Result is null , remove file, ${input_file%.$ext}_fail.$ext" "$LOG_FILE_FAIL"
             fail_count=$((fail_count+1))
 			total_count=$((total_count+1))
         fi
@@ -303,12 +322,12 @@ main() {
     after_size=$(du -sb "$OUTPUT_DIR" | awk '{print $1}')
 	
 	# 计算差值和压缩率
-	diff_size=$((before_size - after_size))
+	diff_size=$((before_size - after_size - skip_size))
     if [ $diff_size -ge 0 ]; then
         size_change="释放"
 		compression_ratio=$(echo "scale=2; $diff_size / $before_size * 100" | bc)
     else [ $diff_size -lt 0 ]
-        diff_size=$((after_size - before_size))
+        diff_size=$((skip_size + after_size - before_size))
         size_change="增加"
         compression_ratio=$(echo "scale=2; $after_size / $before_size * 100" | bc)
     fi
