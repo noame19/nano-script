@@ -9,7 +9,9 @@
 INPUT_DIR="/home/test/input"
 OUTPUT_DIR="/home/test/output"
 LOG_DIR="/home/test/logs"
-
+#如果系统环境已经存在这两个命令，则无需修改
+FFMPEG_DIR="/usr/bin/ffmpeg"
+FFPROBE_DIR="/usr/bin/ffprobe"
 
 #设置处理器线程数和压缩分辨率码率（单位：kbps）
 #关于不标准分辨率的视频，会以现有4k的码率，进行等像素比缩小码率
@@ -30,8 +32,8 @@ MAX_TRY="3"
 ###==================================================
 
 LOG_FILE_ALL="$LOG_DIR/video_log_$(date +%Y%m%d).txt"
-LOG_FILE_FAIL="$LOG_DIR/video_fail_$(date +%Y%m).txt"
-LOG_FILE_DONE="$LOG_DIR/video_done_$(date +%Y).txt"
+LOG_FILE_FAIL="$LOG_DIR/video_fail_log.txt"
+LOG_FILE_DONE="$LOG_DIR/video_done_log.txt"
 
 # 日志写入
 write_log() {
@@ -59,7 +61,7 @@ convert_size() {
 clean() {
 	# 清理30天过期日志文件
     find "$LOG_DIR" -type f -name "video_log_*.txt"  -mtime +30 -exec rm {} \;
-    find "$LOG_DIR" -type f -name "video_fail_*.txt" -mtime +30 -exec rm {} \;
+    #find "$LOG_DIR" -type f -name "video_fail_*.txt" -mtime +30 -exec rm {} \;
 }
 
 # 获取重试次数函数
@@ -69,7 +71,7 @@ get_retry_count() {
 	
 # 获取视频时长
 # get_video_duration() {
-	# #ffmpeg -i "$1" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',' | cut -d'.' -f1
+	# #$FFMPEG_DIR -i "$1" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d ',' | cut -d'.' -f1
 # }
 
 # 获取要跳过文件的大小,并累加
@@ -83,19 +85,19 @@ total_skip_size() {
 # 使用ffprobe获取视频信息：分辨率,时长
 get_video_info() {
 	# 如果流数量大于2，则进行转封装临时文件，再进行时长获取
-	local stream_count=$(ffprobe -v error -show_format -show_entries format=nb_streams -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | sed -n '1p')
-	if [ $stream_count -gt 2 ]; then
+	local stream_count=$("$FFPROBE_DIR" -v error -show_format -show_entries format=nb_streams -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | sed -n '1p')
+	if [ "$stream_count" -gt 2 ]; then
 		local temp_file="$OUTPUT_DIR/temp.mp4"
 		write_log "info" "stream $stream_count,cover to stream1.temp $1" "$LOG_FILE_ALL"
-		ffmpeg -y -i "$1" -c copy -map 0:v -map 0:a -sn -f mp4 "$temp_file" #-sn禁用字幕复制
-		ffprobe -v error -select_streams v:0 -show_entries stream=width,height,bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
-		ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null | cut -d'.' -f1
-		ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
+		"$FFMPEG_DIR" -y -i "$1" -c copy -map 0:v -map 0:a -sn -f mp4 "$temp_file" #-sn禁用字幕复制
+		"$FFPROBE_DIR" -v error -select_streams v:0 -show_entries stream=width,height,bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
+		"$FFPROBE_DIR" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null | cut -d'.' -f1
+		"$FFPROBE_DIR" -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$temp_file" 2>/dev/null
 		rm -f "$temp_file"  # 删除临时文件
 	else
-		ffprobe -v error -select_streams v:0 -show_entries stream=width,height,bit_rate -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null
-		ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | cut -d'.' -f1
-		ffprobe -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null
+		"$FFPROBE_DIR" -v error -select_streams v:0 -show_entries stream=width,height,bit_rate -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null
+		"$FFPROBE_DIR" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null | cut -d'.' -f1
+		"$FFPROBE_DIR" -v error -select_streams a:0 -show_entries stream=bit_rate -of default=noprint_wrappers=1:nokey=1 "$1" 2>/dev/null
 	fi
 }
 
@@ -116,10 +118,14 @@ video_replace() {
 				# 检查压缩文件是否存在
 				if [ -f "$compressed_file" ]; then
 					# 移动压缩文件到源文件位置
-					write_log "info" "$compressed_file -> $src_file" "$LOG_FILE_ALL"
 					mv "$compressed_file" "$src_file"
+					write_log "info" "$compressed_file -> $src_file" "$LOG_FILE_ALL"
 					rm -rf "${compressed_file%/*}"
 					# 删除源文件
+					# 获取原视频文件的创建日期和时间戳
+					original_date=$(stat -c %y "$src_file_replace")
+					# 压缩操作完成后，用 touch 命令将新文件的时间戳设置为原文件的创建日期
+					touch -d "$original_date" "$src_file"
 					rm "$src_file_replace"
 					write_log "info" "$src_file_replace was removed" "$LOG_FILE_ALL"
 					move_count=$((move_count+1))
@@ -132,8 +138,8 @@ video_replace() {
 			fi
 		done
 		local total_replace=$(wc -l < "$LOG_FILE_DONE")
-		echo "需要移动$total_replace个视频，实际成功移动$move_count个"
-		write_log "info" "需要移动$total_replace个视频，实际成功移动$move_count个" "$LOG_FILE_ALL"
+		echo "需要移动$total_replace个视频，实际成功移动$move_count个;"
+		write_log "info" "需要移动$total_replace个视频，实际成功移动$move_count个;" "$LOG_FILE_ALL"
 		write_log "info" "Replace misson finished" "$LOG_FILE_ALL"
 		rm -f "$LOG_FILE_DONE"
 		sleep 3
@@ -141,6 +147,19 @@ video_replace() {
 }
 # 压缩主函数
 main() {
+	#创建log文件夹
+	if [ ! -d "$LOG_DIR" ]; then
+		mkdir -p "$LOG_DIR"
+	fi
+	if [ ! -d "$OUTPUT_DIR" ]; then
+		mkdir -p "$OUTPUT_DIR"
+	fi
+	#判定是否ffmpeg是否可以执行
+	if [ ! -x "$FFMPEG_DIR" ] && [ ! -x "$FFPROBE_DIR" ] && [ ! -x "/usr/bin/bc"]; then
+		echo "FFMPEG, FFPROBE, bc not install or can't execute,please check $FFMPEG_DIR and $FFPROBE_DIR"
+		echo "FFMPEG, FFPROBE, bc not install or can't execute,please check $FFMPEG_DIR and $FFPROBE_DIR" >> "$LOG_FILE_ALL"
+		return
+	fi
 
     #定义计算变量
     local total_count=0
@@ -149,13 +168,6 @@ main() {
     local skip_count=0
 	local skip_size=0
 	
-	#创建log文件夹
-	if [ ! -d "$LOG_DIR" ]; then
-		mkdir -p "$LOG_DIR"
-	fi
-	if [ ! -d "$OUTPUT_DIR" ]; then
-		mkdir -p "$OUTPUT_DIR"
-	fi
     clean
 	video_replace
 
@@ -276,13 +288,13 @@ main() {
 		vbufsize=$(echo "scale=0; $vmax_bitrate * 2" | bc)
 		
 		# 压缩视频，使用 2-pass 方式
-		ffmpeg -y -i "$input_file" -c:v libx264 -b:v "${v_bitrate}k" -pass 1 -threads "${THREADS}" -an -f mp4 /dev/null && \
-		ffmpeg -y -i "$input_file" -c:v libx264 -b:v "${v_bitrate}k" -maxrate "${vmax_bitrate}k" -bufsize "${vbufsize}k" -pass 2 -threads "${THREADS}" -c:a aac -b:a "${a_bitrate}k" "$output_file"
+		"$FFMPEG_DIR" -y -i "$input_file" -c:v libx264 -b:v "${v_bitrate}k" -pass 1 -threads "${THREADS}" -an -f mp4 /dev/null && \
+		"$FFMPEG_DIR" -y -i "$input_file" -c:v libx264 -b:v "${v_bitrate}k" -maxrate "${vmax_bitrate}k" -bufsize "${vbufsize}k" -pass 2 -threads "${THREADS}" -c:a aac -b:a "${a_bitrate}k" "$output_file"
 		rm -f ffmpeg2pass-*
 		
 		# 匹配压缩前后时长，检测压缩后的文件是否正常,-s表示有文件大小为真
         if [ -s "$output_file" ]; then
-            compressed_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null | cut -d'.' -f1)
+            compressed_duration=$("$FFPROBE_DIR" -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$output_file" 2>/dev/null | cut -d'.' -f1)
             if [ "$original_duration" -eq "$compressed_duration" ] || [ $((original_duration - compressed_duration)) -le $GAP_TIME ] && [ $((compressed_duration - original_duration)) -le $GAP_TIME ]; then
 				#成功后把源文件重命名成过度文件
 				mv "$output_file" "${output_file%.$ext}_batch.mp4"
@@ -319,9 +331,8 @@ main() {
 	
 	 # 获取压缩后目录大小
     after_size=$(du -sb "$OUTPUT_DIR" | awk '{print $1}')
-	
 	# 计算差值和压缩率
-	if [ $after_size -ne 0 ]; then 
+	if [ $after_size -gt 4096 ]; then 
 		diff_size=$((before_size - after_size - skip_size))
 		if [ $diff_size -ge 0 ]; then
 			size_change="释放"
